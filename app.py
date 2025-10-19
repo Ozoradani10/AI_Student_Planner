@@ -1,79 +1,107 @@
-# app.py — Pairent Autonomous Student Planner
-import streamlit as st
-import os, json
-from datetime import datetime
-from zoneinfo import ZoneInfo
+# email_reader.py — read latest university emails via IMAP
+import imaplib
+import email
+from email.header import decode_header
+from typing import List, Tuple, Optional
+import os
+import re
 
-from scheduler import run_auto_sync
-from email_reader import fetch_recent_emails
-from portal_scraper import fetch_portal_texts
+def _decode(s, enc):
+    try:
+        return s.decode(enc or "utf-8", errors="ignore") if isinstance(s, bytes) else str(s)
+    except Exception:
+        return s if isinstance(s, str) else str(s or "")
 
-# --- CONFIG ---
-TIMEZONE = ZoneInfo("Europe/Istanbul")
+def _extract_text(msg: email.message.Message) -> str:
+    # Prefer text/plain; fall back to text/html -> strip tags crudely
+    text_parts = []
+    for part in msg.walk():
+        ctype = part.get_content_type()
+        disp = str(part.get("Content-Disposition") or "").lower()
+        if part.is_multipart():
+            continue
+        if "attachment" in disp:
+            continue
+        try:
+            payload = part.get_payload(decode=True) or b""
+        except Exception:
+            payload = b""
+        txt = _decode(payload, part.get_content_charset())
+        if ctype == "text/html":
+            # very light HTML strip so the parser gets clean text
+            txt = re.sub(r"<(script|style)[\s\S]*?</\1>", "", txt, flags=re.I)
+            txt = re.sub(r"<br\s*/?>", "\n", txt, flags=re.I)
+            txt = re.sub(r"<[^>]+>", " ", txt)
+        text_parts.append(txt)
+    return "\n".join(text_parts).strip()
 
-st.set_page_config(page_title="Pairent – AI Student Planner", layout="wide")
+def _decode_subject(raw_subj) -> str:
+    if not raw_subj:
+        return ""
+    try:
+        parts = decode_header(raw_subj)
+        out = []
+        for val, enc in parts:
+            out.append(_decode(val, enc))
+        return "".join(out).strip()
+    except Exception:
+        return str(raw_subj)
 
-st.title("📘 Pairent — AI Student Planner")
-st.caption("Automatically collects updates from your email & portal, understands them with AI, builds your schedule — no typing.")
+def fetch_recent_emails(
+    email: Optional[str] = None,
+    app_password: Optional[str] = None,
+    imap_host: Optional[str] = None,
+    limit: int = 25,
+) -> Tuple[List[str], List[str]]:
+    """
+    Returns (subjects[], bodies[]) of the most recent messages.
+    If email/app_password not provided, falls back to Streamlit secrets / env:
+      IMAP_USER, IMAP_PASS, IMAP_HOST
+    """
+    user = email or os.getenv("IMAP_USER")
+    pwd = app_password or os.getenv("IMAP_PASS")
+    host = (imap_host or os.getenv("IMAP_HOST") or "imap.gmail.com").strip()
 
-# --- LOGIN ---
-st.sidebar.header("🔒 Student Login")
-email = st.sidebar.text_input("University Email")
-password = st.sidebar.text_input("App Password (Gmail App-specific password)", type="password")
+    if not user or not pwd:
+        # Nothing to read
+        return [], []
 
-if not email or not password:
-    st.warning("Please sign in with your Gmail app password.")
-    st.stop()
+    try:
+        M = imaplib.IMAP4_SSL(host)
+        M.login(user, pwd)
+        M.select("INBOX")
+        # Recent first
+        typ, data = M.search(None, "ALL")
+        if typ != "OK" or not data or not data[0]:
+            M.logout()
+            return [], []
 
-# --- MAIN ---
-col1, col2 = st.columns([2, 1])
+        ids = data[0].split()
+        ids = ids[-limit:]  # take last N
+        subjects, bodies = [], []
 
-with col1:
-    st.subheader("🗓 Your schedule")
+        for i in reversed(ids):  # newest to oldest
+            typ, msg_data = M.fetch(i, "(RFC822)")
+            if typ != "OK" or not msg_data:
+                continue
+            raw = msg_data[0][1]
+            msg = email.message_from_bytes(raw)
 
-    events_path = "events.json"
-    if os.path.exists(events_path):
-        with open(events_path, "r", encoding="utf-8") as f:
-            events = json.load(f)
-    else:
-        events = []
+            subj = _decode_subject(msg.get("Subject"))
+            body = _extract_text(msg)
 
-    if not events:
-        st.info("No events yet. Click *Sync now* to ingest your email/portal.")
-    else:
-        events.sort(key=lambda e: e.get("when", ""))
-        for e in events:
-            title = e.get("title", "Untitled")
-            when = e.get("when", "")
-            loc = e.get("location", "")
-            st.markdown(f"{title}**  \n🕓 {when}  \n📍 {loc}")
+            # Keep only potentially relevant updates (still pass everything to AI later)
+            # Light filter so we don’t flood:
+            if subj or body:
+                subjects.append(subj)
+                bodies.append(body)
 
-with col2:
-    st.subheader("⚙ Controls")
-    st.caption("IMAP + OpenAI come from Streamlit Secrets. Portal auto-detects. (Timezone: Europe/Istanbul)")
+        M.logout()
+        return subjects, bodies
 
-    # --- SYNC BUTTON ---
-    if st.button("🔄 Sync now (read email + portal + AI)"):
-        st.info("Syncing... please wait ⏳")
-        subjects, bodies = fetch_recent_emails(email=email, app_password=password, limit=25)
-        results = run_auto_sync(bodies, subjects)
-        if results:
-            st.success(f"{len(results)} new events found and synced successfully!")
-        else:
-            st.warning("No new events found. Try again after receiving a new schedule email.")
-
-    # --- GENERATE WITH AI (Demo) ---
-    if st.button("🧠 Generate with AI (demo)"):
-        st.info("Generating your AI-based sample schedule...")
-        demo_events = [
-            {"type": "class", "title": "AI Fundamentals", "when": "2025-10-21T09:00:00", "location": "Room 201"},
-            {"type": "meeting", "title": "Math Midterm", "when": "2025-10-23T16:00:00", "location": "Main Hall"},
-            {"type": "notice", "title": "Project Discussion", "when": "2025-10-25T18:00:00", "location": "Library"},
-        ]
-        with open(events_path, "w", encoding="utf-8") as f:
-            json.dump(demo_events, f, ensure_ascii=False, indent=2)
-        st.success("Demo schedule generated successfully!")
-
-# --- FOOTER ---
-st.markdown("---")
-st.caption("© 2025 Pairent Autonomous Student Planner – built for Turkish universities 🇹🇷")
+    except imaplib.IMAP4.error:
+        # authentication or mailbox error
+        return [], []
+    except Exception:
+        # Any other network/parse error -> return empty so UI shows a gentle warning
+        return [], [] 
