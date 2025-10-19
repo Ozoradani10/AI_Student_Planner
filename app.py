@@ -12,7 +12,6 @@
 #   openai>=1.0.0
 #   python-dotenv
 
-from _future_ import annotations
 import os
 import re
 import ssl
