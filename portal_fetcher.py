@@ -1,5 +1,5 @@
 # portal_fetcher.py
-from _future_ import annotations
+from __future__ import annotations
 import requests
 from datetime import datetime
 from zoneinfo import ZoneInfo
