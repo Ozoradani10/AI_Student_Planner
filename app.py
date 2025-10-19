@@ -120,8 +120,10 @@ if not OPENAI_API_KEY:
     st.error("OPENAI_API_KEY is missing in Secrets. Add it and reboot the app.")
     st.stop()
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+import os
+from openai import OpenAI
 
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ---------- LLM ----------
 SYS_PROMPT = (
