@@ -1,61 +1,43 @@
-# email_reader.py
-import imaplib, email, datetime
-from email.header import decode_header, make_header
+# email_reader.py — Gmail IMAP auto fetcher for Païrent
+import os, imaplib, email
+from email.header import decode_header
 
-def _decode_hdr(x):
+IMAP_HOST = os.getenv("IMAP_HOST", "imap.gmail.com")
+IMAP_USER = os.getenv("IMAP_USER")
+IMAP_PASS = os.getenv("IMAP_PASS")
+
+def fetch_recent_emails(limit: int = 20):
+    """Fetch the most recent emails and return (subjects, bodies)."""
+    subjects, bodies = [], []
     try:
-        return str(make_header(decode_header(x or "")))
-    except Exception:
-        return x or ""
+        mail = imaplib.IMAP4_SSL(IMAP_HOST)
+        mail.login(IMAP_USER, IMAP_PASS)
+        mail.select("inbox")
 
-def fetch_recent_emails(host, user, pwd, since_hours=48, from_filters=None, max_items=50):
-    """Return a list of dicts: {subject, body, date} from IMAP (Gmail works with App Password)."""
-    msgs = []
-    since_date = (datetime.datetime.utcnow() - datetime.timedelta(hours=since_hours)).strftime("%d-%b-%Y")
-    M = imaplib.IMAP4_SSL(host)
-    M.login(user, pwd)
-    M.select("INBOX")
-    typ, data = M.search(None, '(SINCE "{}")'.format(since_date))
-    if typ != "OK":
-        M.logout()
-        return msgs
+        _, data = mail.search(None, "ALL")
+        mail_ids = data[0].split()[-limit:]
+        for mid in reversed(mail_ids):
+            _, msg_data = mail.fetch(mid, "(RFC822)")
+            msg = email.message_from_bytes(msg_data[0][1])
 
-    ids = data[0].split()
-    ids = ids[-max_items:]  # last N
-    for i in reversed(ids):
-        typ, msg_data = M.fetch(i, "(RFC822)")
-        if typ != "OK": 
-            continue
-        msg = email.message_from_bytes(msg_data[0][1])
+            # Decode subject
+            subj, enc = decode_header(msg.get("Subject"))[0]
+            if isinstance(subj, bytes):
+                subj = subj.decode(enc or "utf-8", errors="ignore")
+            subjects.append(subj or "")
 
-        subj = _decode_hdr(msg.get("Subject"))
-        frm  = _decode_hdr(msg.get("From"))
-        date = msg.get("Date")
+            # Extract body
+            body_text = ""
+            if msg.is_multipart():
+                for part in msg.walk():
+                    if part.get_content_type() == "text/plain":
+                        body_text += part.get_payload(decode=True).decode("utf-8", errors="ignore")
+                        break
+            else:
+                body_text = msg.get_payload(decode=True).decode("utf-8", errors="ignore")
 
-        if from_filters:
-            f = (frm or "").lower()
-            if not any(src.lower() in f for src in from_filters):
-                # allow professor domains like .edu or the university domain
-                pass
-
-        # extract plain text body
-        body = ""
-        if msg.is_multipart():
-            for part in msg.walk():
-                ctype = part.get_content_type()
-                disp  = part.get("Content-Disposition", "")
-                if ctype == "text/plain" and "attachment" not in (disp or "").lower():
-                    try:
-                        body += part.get_payload(decode=True).decode(part.get_content_charset() or "utf-8", errors="ignore")
-                    except Exception:
-                        pass
-        else:
-            try:
-                body = msg.get_payload(decode=True).decode(msg.get_content_charset() or "utf-8", errors="ignore")
-            except Exception:
-                pass
-
-        msgs.append({"subject": subj, "from": frm, "date": date, "body": body})
-    M.close()
-    M.logout()
-    return msgs
+            bodies.append(body_text)
+        mail.logout()
+    except Exception as e:
+        print("Email fetch error:", e)
+    return subjects, bodies
