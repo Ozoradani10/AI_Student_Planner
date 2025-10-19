@@ -1,0 +1,7 @@
+[server]
+fileWatcherType = "poll"
+headless = true
+enableXsrfProtection = true
+
+[client]
+toolbarMode = "minimal"
