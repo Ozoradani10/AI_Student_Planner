@@ -1,6 +1,6 @@
 # app.py — Pairent Autonomous Student Planner (Fully Working Version)
 
-from _future_ import annotations
+from __future__ import annotations
 import os, json, time, threading
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
