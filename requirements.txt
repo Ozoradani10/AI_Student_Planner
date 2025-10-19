@@ -3,5 +3,6 @@ openai>=1.10.0
 python-dotenv>=1.0.1
 dateparser
 pytz
-smtplib
 email-validator
+requests
+smtplib
