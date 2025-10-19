@@ -1,4 +1,4 @@
-# app.py — Païrent autonomous student planner
+# app.py — Païrent Autonomous Student Planner
 from _future_ import annotations
 import os, json, time, threading
 from datetime import datetime, timedelta
@@ -7,9 +7,10 @@ import streamlit as st
 
 # Internal imports
 from ai_parser import parse_updates_to_events
-from scheduler import load_events, save_events, start_background
+from scheduler import load_events, save_events
 from portal_detector import discover_ics_links_from_emails
 from portal_fetcher import fetch_ics_events
+from email_reader import fetch_recent_emails
 
 # --- Settings ---
 TIMEZONE = ZoneInfo("Europe/Istanbul")
@@ -36,31 +37,30 @@ def run_auto_sync(email_bodies: list[str], email_subjects: list[str]):
     TZ = ZoneInfo("Europe/Istanbul")
     all_events = []
 
-    # 1️⃣ Collect raw email texts
     texts = (email_subjects or []) + (email_bodies or [])
     if not texts:
         return []
 
-    # 2️⃣ Discover ICS URLs (from secrets + automatic detection)
+    # Discover ICS URLs
     ics_urls = set()
     if os.getenv("PORTAL_ICS_URL"):
         ics_urls.add(os.getenv("PORTAL_ICS_URL").strip())
     for url in discover_ics_links_from_emails(texts):
         ics_urls.add(url)
 
-    # 3️⃣ Fetch ICS events
+    # Fetch ICS events
     ics_events = []
     for url in ics_urls:
         ics_events.extend(fetch_ics_events(url, TZ))
 
-    # 4️⃣ Extract events from emails using OpenAI
+    # Extract events via AI
     try:
         ai_events = parse_updates_to_events(os.getenv("OPENAI_API_KEY"), texts)
     except Exception as e:
         ai_events = []
         print("AI parsing failed:", e)
 
-    # 5️⃣ Merge and return everything
+    # Merge and return everything
     all_events = (ai_events or []) + (ics_events or [])
     save_events(all_events)
     return all_events
@@ -92,23 +92,48 @@ with col1:
             """, unsafe_allow_html=True)
 
 # --- RIGHT COLUMN: controls ---
+try:
+    LAST_BG_SYNC = st.session_state.get("LAST_BG_SYNC")
+except Exception:
+    LAST_BG_SYNC = None
+
 with col2:
     st.subheader("⚙ Connections & Controls")
     st.caption("IMAP + SMTP are read from your Streamlit Secrets. Portal ICS auto-detected.")
     st.caption("Timezone: Europe/Istanbul")
+    st.caption(
+        "Background auto-sync: ON · Last run: "
+        + (LAST_BG_SYNC.astimezone(TIMEZONE).strftime("%Y-%m-%d %H:%M") if LAST_BG_SYNC else "—")
+    )
 
     if st.button("🔄 Sync now (read email + portal + AI)"):
-        st.info("Syncing... please wait ⏳")
-
-        from email_reader import fetch_recent_emails
-
-subjects, bodies = fetch_recent_emails(limit=25)
-results = run_auto_sync(bodies, subjects)
-
+        st.info("Syncing… please wait ⏳")
+        subjects, bodies = fetch_recent_emails(limit=25)
+        results = run_auto_sync(bodies, subjects)
         if results:
             st.success(f"✅ {len(results)} events found and synced successfully!")
         else:
             st.warning("⚠ No new events found. Try again after receiving an email with schedule info.")
+
+# -------------------- BACKGROUND AUTO SYNC (hourly) --------------------
+def background_sync_loop():
+    """Read Gmail + portal automatically every hour and merge events."""
+    global LAST_BG_SYNC
+    while True:
+        try:
+            subjects, bodies = fetch_recent_emails(limit=25)
+            run_auto_sync(bodies, subjects)
+            LAST_BG_SYNC = datetime.now(TIMEZONE)
+            st.session_state["LAST_BG_SYNC"] = LAST_BG_SYNC
+            print("[Païrent] Background sync OK at", LAST_BG_SYNC)
+        except Exception as e:
+            print("[Païrent] Background sync error:", e)
+        time.sleep(3600)  # run again in 1 hour
+
+if not st.session_state.get("BG_THREAD_STARTED"):
+    threading.Thread(target=background_sync_loop, daemon=True).start()
+    st.session_state["BG_THREAD_STARTED"] = True
+# ----------------------------------------------------------------------
 
 st.markdown("<hr>", unsafe_allow_html=True)
 st.caption("© 2025 Païrent Autonomous Student Planner — built for Turkish universities 🇹🇷")
