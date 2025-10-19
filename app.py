@@ -1,3 +1,5 @@
+import os
+os.environ["WATCHFILES_FORCE_POLLING"] = "true"
 # app.py  —  AI Student Planner (Premium UI + HTML Email + ICS)
 # Requires Streamlit Secrets:
 #   OPENAI_API_KEY = "sk-..."
