@@ -1,378 +1,191 @@
-# Pairent — Autonomous AI Student Planner (Final Master Version)
-# Single-file app: login -> background IMAP fetch -> AI parse -> schedule -> reminders
-# Works on desktop & mobile (Streamlit). No buttons required after sign-in.
-
-import os, re, ssl, json, time, threading, imaplib, smtplib
-from email import policy
-from email.parser import BytesParser
-from email.mime.text import MIMEText
-from datetime import datetime, timedelta
+# app.py — Pairent instant-response (richer UI + schedule email)
+import os, json
+from datetime import datetime
 from zoneinfo import ZoneInfo
-
 import streamlit as st
-from openai import OpenAI
 
-# ---------- CONFIG ----------
-APP_NAME = "Pairent — AI Student Planner"
-TZ_DEFAULT = "Europe/Istanbul"           # Turkey default
-SYNC_EVERY_MINUTES = 15                  # background interval
-MORNING_SUMMARY_HOUR = 8                 # local time
-REMINDER_LEAD_MIN = 60                   # email & in-app reminder before event
+from email_reader import fetch_recent_emails
+from ai_parser import extract_events_from_texts, generate_study_plan
+from notifier import send_email
 
-DATA_FILE = "events.json"                # persisted per app instance (not per user)
+APP_TITLE = "📘 Pairent — AI Student Planner"
+SUB = "Automatically collects updates from your email, understands them with AI, and builds your schedule — no typing."
+DEFAULT_TZ = "Europe/Istanbul"
 
-MODEL = "gpt-4o-mini"
-
-HERO_TITLE = "📘 Pairent — AI Student Planner"
-HERO_SUB = ("Automatically collects updates from your email & portals, "
-            "understands them with AI, builds your schedule, and reminds you — no typing.")
-
-SYSTEM = """
-You extract actionable student events from raw emails/announcements.
-Return JSON with key "events": list of objects, each:
-{ "type": "exam|deadline|class|meeting|notice",
-  "title": "short title",
-  "when": "ISO 8601 datetime or clear natural time (accept local human phrases)",
-  "location": "string or ''",
-  "notes": "short notes" }
-Only output events you are confident about. If only a due date, still use "when" for its due time.
-Combine subject + body if both are provided.
+# ---------- Styles ----------
+HERO_CSS = """
+<style>
+:root { --pairent-accent:#00ADB5; }
+.stApp { background:#0b0f14; }
+h1,h2,h3,h4 { color:#f5f7fa !important; }
+.small-note{opacity:.75;font-size:.95rem}
+.hero{
+  padding:18px;border-radius:16px;background:linear-gradient(135deg,#0f1a26 0%,#0c1a1f 100%);
+  border:1px solid #1e2a38;margin-bottom:10px
+}
+.card{padding:12px 14px;border-radius:12px;background:#11161e;border:1px solid #1f2a37;margin:10px 0;}
+.divider{height:1px;background:#1c2835;margin:12px 0}
+.event{padding:10px;border-radius:10px;background:#0f1720;border:1px solid #1e2a38;margin:6px 0}
+.event .title{font-weight:700;color:#e7f9ff}
+.event .when{opacity:.9}
+.event .where{opacity:.8;font-size:.95rem}
+.btn-primary button{background:#00ADB5!important;border-color:#00ADB5!important;color:#041217!important;font-weight:700}
+footer{visibility:hidden}
+</style>
 """
 
-# ---------- helpers: storage ----------
-def load_events() -> list[dict]:
-    if not os.path.exists(DATA_FILE):
-        return []
-    try:
-        with open(DATA_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return []
+st.set_page_config(page_title="Pairent — AI Planner", page_icon="📘", layout="wide")
+st.markdown(HERO_CSS, unsafe_allow_html=True)
 
-def save_events(events: list[dict]) -> None:
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(events, f, ensure_ascii=False, indent=2)
-
-def dedupe_events(items: list[dict]) -> list[dict]:
-    seen = set()
-    out = []
-    for e in items:
-        key = (e.get("title","").strip().lower(), e.get("when","").strip())
-        if key in seen: 
-            continue
-        seen.add(key)
-        out.append(e)
-    return out
-
-# ---------- helpers: email servers autodetect ----------
-def detect_servers(email_addr: str):
-    dom = email_addr.split("@")[-1].lower()
-    imap_host = smtp_host = None
-    if dom in ("gmail.com","googlemail.com"):
-        imap_host, smtp_host = "imap.gmail.com", "smtp.gmail.com"
-    elif dom in ("outlook.com","hotmail.com","live.com","office365.com","outlook.office365.com","outlook.sa"):
-        imap_host, smtp_host = "outlook.office365.com", "smtp.office365.com"
-    elif dom in ("yahoo.com","yahoo.co.uk","ymail.com"):
-        imap_host, smtp_host = "imap.mail.yahoo.com", "smtp.mail.yahoo.com"
-    elif dom in ("icloud.com","me.com","mac.com"):
-        imap_host, smtp_host = "imap.mail.me.com", "smtp.mail.me.com"
-    elif dom in ("yandex.com","yandex.ru","ya.ru"):
-        imap_host, smtp_host = "imap.yandex.com", "smtp.yandex.com"
-    else:
-        # best effort fallback
-        imap_host, smtp_host = f"imap.{dom}", f"smtp.{dom}"
-    return imap_host, smtp_host, 993, 587
-
-# ---------- IMAP fetch ----------
-def fetch_recent_emails(email_addr: str, app_password: str, limit: int = 30) -> tuple[list[str], list[str]]:
-    imap_host, _, imap_port, _ = detect_servers(email_addr)
-    subjects, bodies = [], []
-    try:
-        mail = imaplib.IMAP4_SSL(imap_host, imap_port)
-        # Many providers require app passwords / OAuth. This will raise if invalid.
-        mail.login(email_addr, app_password)
-        mail.select("INBOX")
-        # last ~500 ids (cheap)
-        typ, data = mail.search(None, "ALL")
-        if typ != "OK":
-            return [], []
-        ids = data[0].split()
-        for msg_id in ids[-500:][::-1]:  # newest first
-            if len(subjects) >= limit:
-                break
-            typ, raw = mail.fetch(msg_id, "(RFC822)")
-            if typ != "OK":
-                continue
-            msg = BytesParser(policy=policy.default).parsebytes(raw[0][1])
-            subj = str(msg["subject"] or "").strip()
-            body = ""
-            if msg.is_multipart():
-                for part in msg.walk():
-                    ctype = part.get_content_type()
-                    if ctype == "text/plain":
-                        body += part.get_content() or ""
-            else:
-                body = msg.get_content() or ""
-            text = (subj + "\n\n" + body).strip()
-            # Keep only likely academic updates (very lightweight filter)
-            if re.search(r"\b(exam|midterm|final|quiz|deadline|class|lecture|schedule|timetable|assignment|homework|lab|course|meeting)\b", text, re.I):
-                subjects.append(subj)
-                bodies.append(body.strip())
-        mail.logout()
-    except imaplib.IMAP4.error:
-        # auth/IMAP error
-        raise
-    except Exception:
-        # ignore network glitches
-        pass
-    return subjects, bodies
-
-# ---------- SMTP email ----------
-def send_email(email_addr: str, app_password: str, to_addr: str, subject: str, html_body: str):
-    _, smtp_host, _, smtp_port = detect_servers(email_addr)
-    msg = MIMEText(html_body, "html", "utf-8")
-    msg["Subject"] = subject
-    msg["From"] = email_addr
-    msg["To"] = to_addr
-    with smtplib.SMTP(smtp_host, smtp_port) as s:
-        s.starttls(context=ssl.create_default_context())
-        s.login(email_addr, app_password)
-        s.sendmail(email_addr, [to_addr], msg.as_string())
-
-# ---------- AI parsing ----------
-def parse_updates_to_events(api_key: str, texts: list[str]) -> list[dict]:
-    if not texts:
-        return []
-    client = OpenAI(api_key=api_key)
-    joined = "\n\n---\n\n".join(texts)[:15000]  # keep prompt small
-    try:
-        resp = client.chat.completions.create(
-            model=MODEL,
-            temperature=0.2,
-            messages=[
-                {"role":"system","content":SYSTEM},
-                {"role":"user","content":f"Extract events from these updates:\n{joined}"}
-            ],
-            response_format={"type":"json_object"}
-        )
-        import json as _json
-        data = _json.loads(resp.choices[0].message.content)
-        return data.get("events", [])
-    except Exception:
-        return []
-
-# ---------- background worker ----------
-def background_loop():
-    tz = ZoneInfo(st.session_state.get("tz", TZ_DEFAULT))
-    while st.session_state.get("auth_ok", False):
-        try:
-            # 1) Fetch emails
-            subj, bodies = fetch_recent_emails(
-                st.session_state["email"],
-                st.session_state["password"],
-                limit=40
-            )
-            texts = []
-            # Keep very recent bodies first
-            for s, b in list(zip(subj, bodies))[:40]:
-                texts.append((s or "").strip())
-                texts.append((b or "").strip())
-            # 2) AI -> events
-            new_events = parse_updates_to_events(st.secrets["OPENAI_API_KEY"], texts)
-            # Normalize times -> ISO
-            norm = []
-            now = datetime.now(tz)
-            for e in new_events:
-                when = str(e.get("when","")).strip()
-                if not when:
-                    continue
-                # accept already-ISO or natural phrases like "Tue 10:00"
-                try:
-                    dt = None
-                    if re.match(r"\d{4}-\d{2}-\d{2}T", when):
-                        from dateutil.parser import isoparse
-                        dt = isoparse(when)
-                    else:
-                        # very light natural parse (today/tomorrow/HH:MM)
-                        m = re.match(r"(today|tomorrow)?\s*(\d{1,2}:\d{2})?", when, re.I)
-                        if m:
-                            base = now if (m.group(1) or "").lower() == "today" else (now + timedelta(days=1))
-                            hhmm = m.group(2) or "09:00"
-                            h, M = map(int, hhmm.split(":"))
-                            dt = base.replace(hour=h, minute=M, second=0, microsecond=0)
-                    if not dt:
-                        # last resort: ignore item
-                        continue
-                    e["when"] = dt.astimezone(tz).isoformat()
-                    norm.append(e)
-                except Exception:
-                    continue
-            # 3) Merge store
-            all_events = dedupe_events(load_events() + norm)
-            save_events(all_events)
-
-            # 4) Reminders (in-app + email)
-            upcoming_window = datetime.now(tz) + timedelta(minutes=REMINDER_LEAD_MIN + 1)
-            reminders = []
-            for e in all_events:
-                try:
-                    from dateutil.parser import isoparse
-                    dt = isoparse(e["when"]).astimezone(tz)
-                except Exception:
-                    continue
-                mins_left = int((dt - datetime.now(tz)).total_seconds() // 60)
-                if 0 < mins_left <= REMINDER_LEAD_MIN:
-                    label = f"⏰ {e.get('title','(no title)')} at {dt.strftime('%a %d %b %H:%M')}"
-                    # Avoid duplicate reminder spam in same loop
-                    key = dt.isoformat() + "|" + e.get("title","")
-                    if key not in st.session_state.get("sent_keys", set()):
-                        st.session_state.setdefault("sent_keys", set()).add(key)
-                        reminders.append(label)
-                        # Email reminder
-                        try:
-                            send_email(
-                                st.session_state["email"],
-                                st.session_state["password"],
-                                st.session_state["email"],
-                                f"Reminder · {e.get('title','')}",
-                                f"<p>{label}</p><p>Location: {e.get('location','-')}</p>"
-                            )
-                        except Exception:
-                            pass
-            # queue toasts for FE
-            if reminders:
-                st.session_state.setdefault("toasts", []).extend(reminders)
-
-            # 5) Morning summary at MORNING_SUMMARY_HOUR
-            now_local = datetime.now(tz)
-            if now_local.hour == MORNING_SUMMARY_HOUR and now_local.minute < 5:
-                todays = []
-                for e in all_events:
-                    try:
-                        from dateutil.parser import isoparse
-                        dt = isoparse(e["when"]).astimezone(tz)
-                        if dt.date() == now_local.date():
-                            todays.append(f"• {e.get('title','(no title)')} — {dt.strftime('%H:%M')}")
-                    except Exception:
-                        continue
-                if todays:
-                    html = "<h3>Today</h3>" + "<br>".join(todays)
-                    try:
-                        send_email(
-                            st.session_state["email"],
-                            st.session_state["password"],
-                            st.session_state["email"],
-                            "Pairent · Today’s plan",
-                            html
-                        )
-                    except Exception:
-                        pass
-        except imaplib.IMAP4.error:
-            # auth error: pause; UI will show banner
-            st.session_state["auth_ok"] = False
-        except Exception:
-            # swallow other transient errors
-            pass
-        # sleep until next cycle or until logout
-        for _ in range(SYNC_EVERY_MINUTES * 6):
-            if not st.session_state.get("auth_ok", False):
-                return
-            time.sleep(10)
-
-# ---------- UI ----------
-st.set_page_config(page_title=APP_NAME, page_icon="📘", layout="wide")
-tz_name = st.session_state.get("tz", TZ_DEFAULT)
-tz = ZoneInfo(tz_name)
-
-# Sidebar login
+# ---------- Sidebar: login ----------
 with st.sidebar:
-    st.markdown("## 🔐 Student Login")
-    email_in = st.text_input("University / Personal Email", value=st.session_state.get("email",""))
-    pwd_in = st.text_input("Email password (or Gmail app password)", type="password", value=st.session_state.get("password",""))
-    tz_opts = ["Europe/Istanbul","Europe/Berlin","Europe/London","Asia/Almaty","Asia/Tashkent","UTC"]
-    tz_name = st.selectbox("Timezone", tz_opts, index=tz_opts.index(tz_name) if tz_name in tz_opts else 0)
-    st.session_state["tz"] = tz_name
+    st.markdown("### 🔐 Student Login")
+    email_addr = st.text_input("Email (Gmail recommended)", key="login_email", placeholder="you@gmail.com")
+    app_pass   = st.text_input("App Password (16 chars, no spaces)", key="login_pass", type="password")
+    tz_choice  = st.selectbox("Timezone", ["Europe/Istanbul","Europe/Berlin","Europe/London","Asia/Almaty","Asia/Dubai","UTC"], index=0)
+    st.session_state["tz"] = ZoneInfo(tz_choice)
+    st.caption("Use a Google *App Password* (Security → App passwords). Type without spaces.")
 
-    colA, colB = st.columns(2)
-    with colA:
-        if st.button("Sign in"):
-            st.session_state["email"] = email_in.strip()
-            st.session_state["password"] = pwd_in
-            if st.session_state["email"] and st.session_state["password"]:
-                st.session_state["auth_ok"] = True
-                # start background thread (only once)
-                if not st.session_state.get("bg_started"):
-                    t = threading.Thread(target=background_loop, daemon=True)
-                    t.start()
-                    st.session_state["bg_started"] = True
-            else:
-                st.session_state["auth_ok"] = False
-    with colB:
-        if st.button("Sign out"):
-            st.session_state["auth_ok"] = False
-            st.session_state["email"] = ""
-            st.session_state["password"] = ""
-
-# Hero
-st.markdown(f"### {HERO_TITLE}")
-st.caption(HERO_SUB)
-
-# In-app toasts queued by background worker
-for _ in range(len(st.session_state.get("toasts", []))):
-    msg = st.session_state["toasts"].pop(0)
-    try:
-        st.toast(msg)
-    except Exception:
-        st.info(msg)
-
-# Auth status banner
-if not st.session_state.get("auth_ok", False):
-    st.warning("Please sign in with your email + password (Gmail users: app password recommended). "
-               "Pairent will then begin syncing automatically.")
-else:
-    st.success("Signed in. Pairent is syncing in the background. You’ll receive reminders here and by email.")
-
-# Schedule view
-st.subheader("📅 Your schedule")
-events = load_events()
-if not events:
-    st.info("No events detected yet. As soon as related emails arrive, Pairent will parse them and populate your schedule here automatically.")
-else:
-    # sort by date/time
-    try:
-        from dateutil.parser import isoparse
-        events_sorted = sorted(events, key=lambda e: isoparse(e.get("when","2100-01-01T00:00:00")))
-    except Exception:
-        events_sorted = events
-
-    # group by date
-    by_date = {}
-    for e in events_sorted:
-        try:
-            from dateutil.parser import isoparse
-            d = isoparse(e["when"]).astimezone(ZoneInfo(tz_name)).date().isoformat()
-        except Exception:
-            d = "Unknown"
-        by_date.setdefault(d, []).append(e)
-
-    for d, items in by_date.items():
-        st.markdown(f"#### {datetime.fromisoformat(d+'T00:00:00').strftime('%a %d %b %Y')}")
-        for e in items:
-            try:
-                from dateutil.parser import isoparse
-                dt = isoparse(e["when"]).astimezone(ZoneInfo(tz_name))
-                label_time = dt.strftime("%H:%M")
-            except Exception:
-                label_time = "—"
-            st.markdown(
-                f"""
-<div style="padding:10px;border:1px solid #2a2a2a;border-radius:10px;margin:6px 0;background:#111;">
-  <b>{e.get('title','(no title)')}</b> <span style="opacity:.7">({e.get('type','event')})</span><br>
-  🕒 {label_time} &nbsp;&nbsp; 📍 {e.get('location','—')}<br>
-  <span style="opacity:.8">{e.get('notes','')}</span>
+st.markdown(f"""
+<div class="hero">
+  <h1 style="margin:0;">{APP_TITLE}</h1>
+  <div class="small-note">{SUB}</div>
 </div>
-""",
-                unsafe_allow_html=True
-            )
+""", unsafe_allow_html=True)
 
-st.caption("© 2025 Pairent – Autonomous Student Planner")
+left, right = st.columns([2,1])
+
+# ---------- LEFT: schedule ----------
+with left:
+    st.subheader("🗓 Your schedule")
+    events = st.session_state.get("events", [])
+
+    def _parse_iso(s):
+        try:
+            return datetime.fromisoformat(s.replace("Z","+00:00"))
+        except Exception:
+            return None
+
+    if events:
+        events = [e for e in events if _parse_iso(e.get("when",""))]
+        events.sort(key=lambda e: _parse_iso(e["when"]))
+        for e in events:
+            dt_local = _parse_iso(e["when"]).astimezone(st.session_state["tz"])
+            label = dt_local.strftime("%a %d %b, %H:%M")
+            st.markdown(f"""
+            <div class="event">
+              <div class="title">{e.get('title','(no title)')}</div>
+              <div class="when">🕒 {label}</div>
+              <div class="where">📍 {e.get('location','')}</div>
+              <div class="small-note">{e.get('notes','')}</div>
+            </div>
+            """, unsafe_allow_html=True)
+    else:
+        st.info("No events detected yet. As soon as related emails arrive, Pairent will parse them and populate your schedule automatically.")
+
+    # Email my schedule
+    if events and st.button("📧 Email my schedule", use_container_width=True):
+        if not email_addr or not app_pass:
+            st.error("Fill email + app password in the sidebar.")
+        else:
+            rows = []
+            for e in events:
+                dt_local = _parse_iso(e["when"]).astimezone(st.session_state["tz"])
+                rows.append(f"<tr><td>{dt_local.strftime('%a %d %b, %H:%M')}</td><td>{e.get('title','')}</td><td>{e.get('location','')}</td><td>{e.get('notes','')}</td></tr>")
+            html = f"""
+            <div style="font-family:Inter,Arial,sans-serif">
+              <h2 style="color:#00ADB5;margin:0 0 8px">Your Upcoming Schedule</h2>
+              <table cellpadding="8" cellspacing="0" style="border-collapse:collapse;border:1px solid #e6eef2">
+                <thead><tr style="background:#f3fbfc"><th align="left">When</th><th align="left">Title</th><th align="left">Where</th><th align="left">Notes</th></tr></thead>
+                <tbody>{''.join(rows)}</tbody>
+              </table>
+              <p style="opacity:.7">— Pairent</p>
+            </div>
+            """
+            try:
+                send_email(email_addr, app_pass, email_addr, "Your schedule — Pairent", html)
+                st.success(f"Schedule emailed to {email_addr}")
+            except Exception as e:
+                st.error(f"Could not send: {e}")
+
+# ---------- RIGHT: controls ----------
+with right:
+    st.subheader("⚙ Controls")
+    st.caption("IMAP + OpenAI use your sidebar login and server secrets.")
+
+    # SYNC NOW
+    if st.button("📥 Sync now (read email + AI)", use_container_width=True):
+        if not email_addr or not app_pass:
+            st.error("Please fill your email and App Password in the sidebar.")
+        else:
+            with st.spinner("Reading Inbox and extracting events…"):
+                subjects, bodies = fetch_recent_emails(email_addr, app_pass, limit=25)
+                if not bodies:
+                    st.warning("No emails read (Inbox empty or IMAP login failed).")
+                else:
+                    found = extract_events_from_texts(bodies + subjects)
+                    current = st.session_state.get("events", [])
+                    # merge & dedupe
+                    seen = {(e.get("title",""), e.get("when","")) for e in current}
+                    for e in found:
+                        key = (e.get("title",""), e.get("when",""))
+                        if key not in seen:
+                            current.append(e); seen.add(key)
+                    st.session_state["events"] = current
+                    st.success(f"Parsed {len(found)} new event(s).")
+
+    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+    # GENERATE AI PLAN
+    st.markdown("### 🤖 Generate AI Plan")
+    prompt = st.text_input("Goal (one prompt)", placeholder="prepare for math midterm")
+    duration = st.selectbox("Plan type", ["Daily","Weekly","Monthly"], index=1)
+    if st.button("✨ Generate AI Plan", use_container_width=True):
+        if not prompt.strip():
+            st.warning("Please enter a goal.")
+        else:
+            with st.spinner("Creating your personalized plan…"):
+                plan_md = generate_study_plan(prompt, duration)
+                st.session_state["latest_plan"] = plan_md
+            st.success("Plan generated successfully!")
+
+    if st.session_state.get("latest_plan"):
+        st.markdown("#### 📋 Your Plan")
+        st.markdown(st.session_state["latest_plan"])
+
+        if st.button("📧 Email me this plan", use_container_width=True):
+            if not email_addr or not app_pass:
+                st.error("Fill email + app password in the sidebar.")
+            else:
+                try:
+                    send_email(
+                        smtp_user=email_addr,
+                        smtp_pass=app_pass,
+                        to=email_addr,
+                        subject=f"Your {duration} AI Study Plan — Pairent",
+                        html=f"""<div style="font-family:Inter,Arial,sans-serif;color:#111">
+                        <h2 style="color:#00ADB5;margin:0 0 6px">Your {duration} AI Study Plan</h2>
+                        <div style="background:#f7fbfc;border:1px solid #d8eef2;border-radius:10px;padding:14px">{st.session_state["latest_plan"].replace('\n','<br>')}</div>
+                        <p style="opacity:.7">— Pairent</p></div>"""
+                    )
+                    st.info(f"Plan sent to {email_addr} ✅")
+                except Exception as e:
+                    st.error(f"Could not send email: {e}")
+
+    st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
+
+    # DEBUG (shows last subjects so you know IMAP worked)
+    with st.expander("🔎 Debug: show last Inbox subjects"):
+        if email_addr and app_pass:
+            try:
+                subs, _ = fetch_recent_emails(email_addr, app_pass, limit=10)
+                for s in subs[:10]:
+                    st.write("• ", s)
+            except Exception as e:
+                st.error(str(e))
+
+    # Thanks
+    if st.button("🙌 Thanks", use_container_width=True):
+        st.success("We’re glad you’re here! Pairent will keep your schedule tidy.")
+
+st.caption("© 2025 Pairent — Instant-response beta")
