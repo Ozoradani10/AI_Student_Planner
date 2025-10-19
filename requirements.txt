@@ -1,5 +1,5 @@
 streamlit==1.33.0
-openai==1.10.0
+openai==1.51.0
 python-dotenv==1.0.1
 dateparser==1.1.8
 pytz==2023.3
