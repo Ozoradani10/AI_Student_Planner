@@ -1,4 +1,4 @@
-# app.py — Pairent instant-response (richer UI + schedule email)
+# app.py — Pairent (f-string fixed, premium UI edition)
 import os, json
 from datetime import datetime
 from zoneinfo import ZoneInfo
@@ -158,6 +158,8 @@ with right:
                 st.error("Fill email + app password in the sidebar.")
             else:
                 try:
+                    # ✅ FIXED VERSION HERE
+                    plan_html = st.session_state["latest_plan"].replace("\n", "<br>")
                     send_email(
                         smtp_user=email_addr,
                         smtp_pass=app_pass,
@@ -165,8 +167,9 @@ with right:
                         subject=f"Your {duration} AI Study Plan — Pairent",
                         html=f"""<div style="font-family:Inter,Arial,sans-serif;color:#111">
                         <h2 style="color:#00ADB5;margin:0 0 6px">Your {duration} AI Study Plan</h2>
-                        <div style="background:#f7fbfc;border:1px solid #d8eef2;border-radius:10px;padding:14px">{st.session_state["latest_plan"].replace('\n','<br>')}</div>
-                        <p style="opacity:.7">— Pairent</p></div>"""
+                        <div style="background:#f7fbfc;border:1px solid #d8eef2;border-radius:10px;padding:14px">{plan_html}</div>
+                        <p style="opacity:.7">— Pairent</p>
+                        </div>"""
                     )
                     st.info(f"Plan sent to {email_addr} ✅")
                 except Exception as e:
@@ -174,7 +177,7 @@ with right:
 
     st.markdown("<div class='divider'></div>", unsafe_allow_html=True)
 
-    # DEBUG (shows last subjects so you know IMAP worked)
+    # DEBUG PANEL
     with st.expander("🔎 Debug: show last Inbox subjects"):
         if email_addr and app_pass:
             try:
@@ -184,7 +187,7 @@ with right:
             except Exception as e:
                 st.error(str(e))
 
-    # Thanks
+    # THANK YOU BUTTON
     if st.button("🙌 Thanks", use_container_width=True):
         st.success("We’re glad you’re here! Pairent will keep your schedule tidy.")
 
