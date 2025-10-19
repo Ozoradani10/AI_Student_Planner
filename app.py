@@ -71,7 +71,8 @@ if not OPENAI_API_KEY:
     st.error("❌ Missing OpenAI API key in Streamlit Secrets.")
     st.stop()
 
-client = OpenAI(api_key=OPENAI_API_KEY)
+from openai import OpenAI
+client = OpenAI()  # reads OPENAI_API_KEY from Secrets/env
 
 # --- Inputs ---
 email = st.text_input("📨 Your email address")
