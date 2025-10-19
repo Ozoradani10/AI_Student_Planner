@@ -100,11 +100,10 @@ with col2:
     if st.button("🔄 Sync now (read email + portal + AI)"):
         st.info("Syncing... please wait ⏳")
 
-        # DEMO DATA (replace with your Gmail messages later)
-        demo_subjects = ["OBS exam calendar link attached"]
-        demo_bodies = ["Here is your updated university schedule: https://example.edu.tr/student/calendar.ics"]
+        from email_reader import fetch_recent_emails
 
-        results = run_auto_sync(demo_bodies, demo_subjects)
+subjects, bodies = fetch_recent_emails(limit=25)
+results = run_auto_sync(bodies, subjects)
 
         if results:
             st.success(f"✅ {len(results)} events found and synced successfully!")
