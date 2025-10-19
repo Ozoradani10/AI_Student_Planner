@@ -11,22 +11,34 @@ Return JSON with key 'events' = list of objects:
 If an item has only a deadline, still use 'when' for its due time.
 Be conservative: only output events you are confident about."""
 
-def parse_updates_to_events(text):
-    # Prevent empty or invalid input
-    if not text or str(text).strip() == "":
-        return "No new updates found."
+# ai_parser.py
+from openai import OpenAI
 
+SYSTEM = """You extract actionable student events from raw emails/announcements...
+Be conservative: only output events you are confident about."""
+
+def parse_updates_to_events(api_key: str, texts: list[str]) -> list[dict]:
+    """
+    texts: list[str] (email bodies/subjects/portal texts)
+    Returns: list[dict] events with fields: type,title,when,location,notes,source
+    """
+    from openai import OpenAI
+    client = OpenAI(api_key=api_key)
+
+    joined = "\n\n---\n\n".join(texts)
+    resp = client.chat.completions.create(
+        model="gpt-4o-mini",
+        temperature=0.2,
+        messages=[
+            {"role": "system", "content": SYSTEM},
+            {"role": "user", "content": f"Extract events from these updates:\n{joined}"},
+        ],
+        response_format={"type": "json_object"},
+    )
+
+    import json
     try:
-        client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        completion = client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {
-                    "role": "user",
-                    "content": f"Extract exams, deadlines, and class events from this text:\n{text}"
-                }
-            ],
-        )
-        return completion.choices[0].message.content.strip()
-    except Exception as e:
-        return f"AI parsing failed: {str(e)}"
+        data = json.loads(resp.choices[0].message.content)
+        return data.get("events", [])
+    except Exception:
+        return []
