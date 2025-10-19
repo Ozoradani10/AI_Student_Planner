@@ -46,7 +46,7 @@ def fetch_portal_texts(email_bodies: list[str]) -> list[str]:
     return texts
 
 # --- Demo / test ---
-if _name_ == "_main_":
+if __name__ == "__main__":
     test_email = [
         "Your LMS link is https://lms.ankara.edu.tr/login and OBS at https://obs.metu.edu.tr"
     ]
