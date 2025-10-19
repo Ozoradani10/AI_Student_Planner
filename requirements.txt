@@ -1,5 +1,4 @@
-streamlit>=1.33
-dateparser
-pytz
-openai>=1.0.0
-python-dotenv
+streamlit==1.38.0
+openai==1.51.0
+ics==0.7.2
+python-dotenv==1.0.1
