@@ -1,47 +1,64 @@
 import os
 import streamlit as st
-import openai
-import smtplib
-import ssl
+import smtplib, ssl
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-from datetime import datetime, timedelta
-import pytz
-from dateparser import parse
+from openai import OpenAI
 
-# ---- Fix watcher issue ----
+# Fix Streamlit watcher issue
 os.environ["WATCHFILES_FORCE_POLLING"] = "true"
 
-# ---- Page config ----
+# Page setup
 st.set_page_config(page_title="Païrent — AI Student Planner", page_icon="📘", layout="centered")
 
-# ---- UI design ----
+# --- Custom CSS (premium look) ---
 st.markdown("""
-    <style>
-    .main {background-color: #f9fbff;}
-    .title {
-        font-size: 40px;
-        font-weight: bold;
-        color: white;
-        background: linear-gradient(90deg, #4A90E2, #0072FF);
-        padding: 25px;
-        border-radius: 15px;
-        text-align: center;
-    }
-    .subtitle {
-        font-size: 18px;
-        color: #555;
-        text-align: center;
-        margin-top: -10px;
-        margin-bottom: 30px;
-    }
-    </style>
+<style>
+body {
+    background: linear-gradient(135deg, #e0f2ff 0%, #f7faff 100%);
+    font-family: 'Segoe UI', sans-serif;
+}
+div.block-container {
+    padding-top: 3rem;
+}
+.container {
+    max-width: 600px;
+    background: rgba(255,255,255,0.8);
+    backdrop-filter: blur(12px);
+    border-radius: 20px;
+    box-shadow: 0 8px 25px rgba(0, 114, 255, 0.2);
+    padding: 35px 45px;
+    margin: auto;
+}
+h1 {
+    text-align: center;
+    background: linear-gradient(90deg, #0072FF, #00C6FF);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    font-weight: 800;
+    font-size: 2.5em;
+}
+.stTextInput > div > div > input, .stSelectbox > div > div {
+    border-radius: 12px;
+    height: 3rem;
+    border: 1px solid #d3e2ff;
+}
+button[kind="primary"] {
+    background: linear-gradient(90deg, #0072FF, #00C6FF);
+    border-radius: 12px;
+    color: white;
+    border: none;
+    font-weight: 600;
+}
+</style>
 """, unsafe_allow_html=True)
 
-st.markdown('<div class="title">Païrent — AI Student Planner</div>', unsafe_allow_html=True)
-st.markdown('<div class="subtitle">Generate structured daily, weekly, or monthly study plans — delivered in beautiful HTML emails 📧</div>', unsafe_allow_html=True)
+# --- App Layout ---
+st.markdown('<div class="container">', unsafe_allow_html=True)
+st.markdown("<h1>Païrent — AI Student Planner</h1>", unsafe_allow_html=True)
+st.markdown("<p style='text-align:center;color:#555;'>Create daily, weekly, or monthly AI study plans and receive them as elegant HTML emails 📧</p>", unsafe_allow_html=True)
 
-# ---- Secrets ----
+# --- Load environment variables ---
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 SMTP_HOST = os.getenv("SMTP_HOST")
 SMTP_PORT = os.getenv("SMTP_PORT")
@@ -51,62 +68,67 @@ SMTP_EMAIL = os.getenv("SMTP_EMAIL")
 SMTP_NAME = os.getenv("SMTP_NAME")
 
 if not OPENAI_API_KEY:
-    st.error("⚠ OPENAI_API_KEY is missing in Streamlit Secrets!")
+    st.error("❌ Missing OpenAI API key in Streamlit Secrets.")
     st.stop()
 
-# ---- Initialize OpenAI (correct version) ----
-openai.api_key = OPENAI_API_KEY
+client = OpenAI(api_key=OPENAI_API_KEY)
 
-# ---- Input section ----
-st.header("📅 Create your AI Study Plan")
-email = st.text_input("Enter your email:")
-study_goal = st.text_input("What do you want to study or improve?")
-duration = st.selectbox("Select your plan type:", ["Daily", "Weekly", "Monthly"])
+# --- Inputs ---
+email = st.text_input("📨 Your email address")
+goal = st.text_input("🎯 What do you want to study or achieve?")
+duration = st.selectbox("⏱ Choose your plan type", ["Daily", "Weekly", "Monthly"])
 
-# ---- Generate plan ----
-if st.button("Generate Study Plan"):
-    with st.spinner("Generating your personalized study plan..."):
-        try:
-            prompt = f"Create a {duration.lower()} study plan for {study_goal}. Include times, breaks, and productivity tips."
-            response = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}]
-            )
-            plan_text = response.choices[0].message.content
+# --- Generate Plan ---
+if st.button("✨ Generate Study Plan"):
+    if not goal.strip():
+        st.warning("Please enter what you want to study.")
+    else:
+        with st.spinner("Generating your AI-powered study plan..."):
+            try:
+                response = client.chat.completions.create(
+                    model="gpt-3.5-turbo",
+                    messages=[
+                        {"role": "system", "content": "You are an academic planner AI that creates concise and actionable study schedules."},
+                        {"role": "user", "content": f"Create a {duration.lower()} study plan for: {goal}. Include detailed timings, breaks, motivation tips."}
+                    ]
+                )
+                plan_text = response.choices[0].message.content
 
-            st.success("✅ Study plan generated successfully!")
-            st.text_area("📋 Your Study Plan:", plan_text, height=350)
+                st.success("✅ Study plan generated successfully!")
+                st.text_area("📋 Your AI Study Plan", plan_text, height=350)
 
-            # ---- HTML Email ----
-            plan_html = plan_text.replace("\n", "<br>")
+                # HTML formatting for email
+                plan_html = plan_text.replace("\n", "<br>")
+                html_content = f"""
+                <html>
+                <body style="font-family: Arial; background-color: #f4f9ff; padding: 20px;">
+                    <div style="background: white; border-radius: 16px; padding: 25px; box-shadow: 0 4px 20px rgba(0,0,0,0.1);">
+                        <h2 style="color:#0072FF;">📘 Your {duration} Study Plan</h2>
+                        <p>{plan_html}</p>
+                        <hr>
+                        <p style="color:#777;">Generated by <b>Païrent AI Student Planner</b></p>
+                    </div>
+                </body>
+                </html>
+                """
 
-            html_content = f"""
-            <html>
-            <body style="font-family: Arial; background-color: #f5f7fa; padding: 20px;">
-                <div style="background: white; border-radius: 15px; padding: 25px; box-shadow: 0 4px 10px rgba(0,0,0,0.1);">
-                    <h2 style="color: #0072FF;">📘 Your {duration} Study Plan</h2>
-                    <p>{plan_html}</p>
-                    <hr>
-                    <p style="color: #888;">Generated by <b>Païrent AI Student Planner</b></p>
-                </div>
-            </body>
-            </html>
-            """
+                # Send email
+                if email:
+                    msg = MIMEMultipart("alternative")
+                    msg["Subject"] = f"Your {duration} Study Plan — Païrent AI"
+                    msg["From"] = f"{SMTP_NAME} <{SMTP_EMAIL}>"
+                    msg["To"] = email
+                    msg.attach(MIMEText(html_content, "html"))
 
-            if email:
-                msg = MIMEMultipart("alternative")
-                msg["Subject"] = f"Your {duration} Study Plan — Païrent AI"
-                msg["From"] = f"{SMTP_NAME} <{SMTP_EMAIL}>"
-                msg["To"] = email
-                msg.attach(MIMEText(html_content, "html"))
+                    context = ssl.create_default_context()
+                    with smtplib.SMTP(SMTP_HOST, int(SMTP_PORT)) as server:
+                        server.starttls(context=context)
+                        server.login(SMTP_USER, SMTP_PASS)
+                        server.sendmail(SMTP_EMAIL, email, msg.as_string())
 
-                context = ssl.create_default_context()
-                with smtplib.SMTP(SMTP_HOST, int(SMTP_PORT)) as server:
-                    server.starttls(context=context)
-                    server.login(SMTP_USER, SMTP_PASS)
-                    server.sendmail(SMTP_EMAIL, email, msg.as_string())
+                    st.info(f"📩 Your {duration} plan was emailed to {email}!")
 
-                st.info(f"📧 Your {duration} plan has been emailed to {email}!")
+            except Exception as e:
+                st.error(f"❌ Error: {e}")
 
-        except Exception as e:
-            st.error(f"❌ Error: {e}")
+st.markdown("</div>", unsafe_allow_html=True)
