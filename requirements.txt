@@ -1,8 +1,11 @@
-streamlit>=1.33.0
-openai>=1.30.0
-python-dotenv>=1.0.1
-pytz>=2023.3
-dateparser>=1.2.0
-requests>=2.31.0
-beautifulsoup4>=4.12.3
-ics>=0.7.2
+streamlit==1.38.0
+openai==1.47.0
+python-dateutil==2.9.0.post0
+zoneinfo; python_version<"3.9"
+requests==2.32.3
+tqdm==4.66.5
+beautifulsoup4==4.12.3
+html5lib==1.1
+imaplib2==3.6
+smtplib2==1.1.0
+email-validator==2.1.0.post1
