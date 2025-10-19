@@ -1,5 +1,5 @@
 # portal_detector.py
-from _future_ import annotations
+from __future__ import annotations
 import re
 from typing import Iterable, List
 
