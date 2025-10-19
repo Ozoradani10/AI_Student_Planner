@@ -1,99 +1,79 @@
-# app.py — Pairent Autonomous Student Planner (Full AI Version + Notifications)
-from __future__ import annotations
-import os, json, threading, time
-from datetime import datetime, timedelta
-from zoneinfo import ZoneInfo
+# app.py — Pairent Autonomous Student Planner
 import streamlit as st
+import os, json
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
-from scheduler import run_auto_sync, load_events, save_events
+from scheduler import run_auto_sync
 from email_reader import fetch_recent_emails
 from portal_scraper import fetch_portal_texts
-from notifier import send_email_reminder
 
 # --- CONFIG ---
 TIMEZONE = ZoneInfo("Europe/Istanbul")
-TITLE = "Pairent — AI Student Planner"
-SUB = "Autonomous AI agent that collects university updates, understands them, and reminds you — no typing."
 
-st.set_page_config(page_title=TITLE, layout="wide")
+st.set_page_config(page_title="Pairent – AI Student Planner", layout="wide")
 
-# --- LOGIN PANEL ---
-st.sidebar.title("🔐 Student Login")
+st.title("📘 Pairent — AI Student Planner")
+st.caption("Automatically collects updates from your email & portal, understands them with AI, builds your schedule — no typing.")
+
+# --- LOGIN ---
+st.sidebar.header("🔒 Student Login")
 email = st.sidebar.text_input("University Email")
 password = st.sidebar.text_input("App Password (Gmail App-specific password)", type="password")
 
 if not email or not password:
-    st.warning("Please sign in with your student account to continue.")
+    st.warning("Please sign in with your Gmail app password.")
     st.stop()
 
-# Store credentials for all modules
-os.environ["IMAP_USER"] = email
-os.environ["IMAP_PASS"] = password
-os.environ["SMTP_USER"] = email
-os.environ["SMTP_PASS"] = password
+# --- MAIN ---
+col1, col2 = st.columns([2, 1])
 
-# --- HEADER ---
-st.markdown(f"""
-<div style='text-align:center;'>
-  <h1 style='margin-bottom:0;'>{TITLE}</h1>
-  <p style='opacity:0.85;'>{SUB}</p>
-</div>
-""", unsafe_allow_html=True)
-
-col1, col2 = st.columns([2,1])
-
-# --- LEFT: SCHEDULE ---
 with col1:
-    st.subheader("📅 Your Schedule")
-    events = load_events()
-    if not events:
-        st.info("No events detected yet. Click *Sync now* or *Generate with AI*.")
+    st.subheader("🗓 Your schedule")
+
+    events_path = "events.json"
+    if os.path.exists(events_path):
+        with open(events_path, "r", encoding="utf-8") as f:
+            events = json.load(f)
     else:
-        def parse_iso(s):
-            try: return datetime.fromisoformat(s)
-            except: return None
+        events = []
 
-        events = sorted(events, key=lambda e: parse_iso(e.get("when") or ""))
+    if not events:
+        st.info("No events yet. Click *Sync now* to ingest your email/portal.")
+    else:
+        events.sort(key=lambda e: e.get("when", ""))
         for e in events:
-            dt = parse_iso(e.get("when"))
-            if not dt: continue
-            label = dt.astimezone(TIMEZONE).strftime("%a %d %b • %H:%M")
-            st.markdown(f"""
-            <div style='padding:8px;margin:4px 0;border-radius:8px;background:#1e1e1e3a;'>
-              <b>{e.get("title","(no title)")}</b><br>
-              <span style='opacity:0.8;'>{label}</span><br>
-              <span style='font-size:12px;opacity:0.6;'>📍 {e.get("location","")}</span>
-            </div>
-            """, unsafe_allow_html=True)
+            title = e.get("title", "Untitled")
+            when = e.get("when", "")
+            loc = e.get("location", "")
+            st.markdown(f"{title}**  \n🕓 {when}  \n📍 {loc}")
 
-# --- RIGHT: CONTROLS ---
 with col2:
     st.subheader("⚙ Controls")
+    st.caption("IMAP + OpenAI come from Streamlit Secrets. Portal auto-detects. (Timezone: Europe/Istanbul)")
 
+    # --- SYNC BUTTON ---
     if st.button("🔄 Sync now (read email + portal + AI)"):
         st.info("Syncing... please wait ⏳")
-        subjects, bodies = fetch_recent_emails(limit=25)
-        portal_texts = fetch_portal_texts(bodies)
-        results = run_auto_sync(bodies + portal_texts)
+        subjects, bodies = fetch_recent_emails(email=email, app_password=password, limit=25)
+        results = run_auto_sync(bodies, subjects)
         if results:
-            st.success(f"✅ {len(results)} events synced successfully!")
+            st.success(f"{len(results)} new events found and synced successfully!")
         else:
-            st.warning("⚠ No new events found.")
+            st.warning("No new events found. Try again after receiving a new schedule email.")
 
+    # --- GENERATE WITH AI (Demo) ---
     if st.button("🧠 Generate with AI (demo)"):
-        st.info("Generating AI-based demo schedule...")
+        st.info("Generating your AI-based sample schedule...")
         demo_events = [
-            {"type":"class","title":"AI Fundamentals","when":"2025-10-21T09:00:00","location":"Room 203","notes":"Bring laptop"},
-            {"type":"exam","title":"Math Midterm","when":"2025-10-23T13:00:00","location":"Hall B","notes":"Ch 1–4"},
-            {"type":"meeting","title":"Project Discussion","when":"2025-10-25T15:00:00","location":"Library","notes":"Discuss AI Planner"},
+            {"type": "class", "title": "AI Fundamentals", "when": "2025-10-21T09:00:00", "location": "Room 201"},
+            {"type": "meeting", "title": "Math Midterm", "when": "2025-10-23T16:00:00", "location": "Main Hall"},
+            {"type": "notice", "title": "Project Discussion", "when": "2025-10-25T18:00:00", "location": "Library"},
         ]
-        save_events(demo_events)
-        st.success("✅ AI schedule generated!")
+        with open(events_path, "w", encoding="utf-8") as f:
+            json.dump(demo_events, f, ensure_ascii=False, indent=2)
+        st.success("Demo schedule generated successfully!")
 
-    if st.button("📧 Send Reminder Now"):
-        st.info("Sending reminders to your inbox 📨...")
-        send_email_reminder(email, password)
-        st.success("✅ Reminder sent successfully!")
-
-st.markdown("<hr>", unsafe_allow_html=True)
-st.caption("© 2025 Pairent Autonomous Student Planner — built for Turkish universities 🇹🇷")
+# --- FOOTER ---
+st.markdown("---")
+st.caption("© 2025 Pairent Autonomous Student Planner – built for Turkish universities 🇹🇷")
